@@ -1,0 +1,78 @@
+#!/bin/bash
+SOURCE=${BASH_SOURCE[0]}
+while [ -L "$SOURCE" ]; do # resolve $SOURCE until the file is no longer a symlink
+  DIR=$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)
+  SOURCE=$(readlink "$SOURCE")
+  [[ $SOURCE != /* ]] && SOURCE=$DIR/$SOURCE # if $SOURCE was a relative symlink, we need to resolve it relative to the path where the symlink file was located
+done
+DIR=$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)
+
+if [ ! -f "$DIR/.linux-output-tools" ]; then
+  echo "linux-output-tools not found"
+  exit 1
+fi
+
+source "$DIR/.linux-output-tools"
+
+DOCKER_SERVICES_PATH="$HOME/.services"
+TODAY=$(date +%Y-%m-%d)
+
+function __check_service_cd() {
+  if [ ! -f "$DOCKER_SERVICES_PATH/$1/docker-compose.yml" ]; then
+    say --fatal "Service '$1' does not exists."
+    exit 1
+  fi
+  cd $DOCKER_SERVICES_PATH/$1
+}
+
+function __ask_env_review() {
+  local review
+  ask --yes-no "Would you like to open the '.env' file to review it ?" --output=review --clear
+  if [ "$review" -eq "1" ]; then
+    nano .env
+    say --success "The '.env' has been reviewed."
+  else
+    say --info "The '.env' has been kept as-is"
+  fi
+}
+
+case $1 in
+start)
+  __check_service_cd $2
+  docker compose up -d
+  ;;
+stop)
+  __check_service_cd $2
+  docker compose down
+  ;;
+restart)
+  __check_service_cd $2
+  docker compose down
+  docker compose up -d
+  ;;
+update)
+  __check_service_cd $2
+  __ask_env_review
+  docker compose pull
+  docker compose down
+  docker compose up -d
+  ;;
+logs)
+  __check_service_cd $2
+  docker logs -f $2-${3:-service}-1 -f
+  ;;
+list)
+  for service in "$DOCKER_SERVICES_PATH"/*; do
+    echo $service
+  done
+  ;;
+*)
+  say "help"
+  say "start \e[35m<service>\e[0m"
+  say "stop \e[35m<service>\e[0m"
+  say "restart \e[35m<service>\e[0m"
+  say "update \e[35m<service>\e[0m"
+  say "logs \e[35m<service> [container]\e[0m"
+  say "list"
+  ;;
+esac

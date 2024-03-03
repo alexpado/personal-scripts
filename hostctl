@@ -1,0 +1,283 @@
+#!/bin/bash
+SOURCE=${BASH_SOURCE[0]}
+while [ -L "$SOURCE" ]; do # resolve $SOURCE until the file is no longer a symlink
+  DIR=$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)
+  SOURCE=$(readlink "$SOURCE")
+  [[ $SOURCE != /* ]] && SOURCE=$DIR/$SOURCE # if $SOURCE was a relative symlink, we need to resolve it relative to the path where the symlink file was located
+done
+DIR=$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)
+
+if [ ! -f "$DIR/.linux-output-tools" ]; then
+  echo "linux-output-tools not found"
+  exit 1
+fi
+
+source "$DIR/.linux-output-tools"
+
+if [ "$UID" -ne "0" ]; then
+  say --fatal "Please execute this command as root."
+  exit 1
+fi
+
+# hostctl
+#   user create
+#   ufw apply
+#   ufw status
+#   perms fix
+#   jails
+
+UFW_PORT_CONF="$HOME/.security/ufw/ports.conf"
+UFW_NETS_CONF="$HOME/.security/ufw/networks.conf"
+UFW_BAN_CONF="$HOME/.security/ufw/blacklist.conf"
+
+R="\e[0m"
+BLACK="\e[0;30m"
+RED="\e[0;31m"
+GREEN="\e[0;32m"
+ORANGE="\e[0;33m"
+BLUE="\e[0;34m"
+PURPLE="\e[0;35m"
+CYAN="\e[0;36m"
+LIGHT_GRAY="\e[0;37m"
+DARK_GRAY="\e[1;30m"
+LIGHT_RED="\e[1;31m"
+LIGHT_GREEN="\e[1;32m"
+YELLOW="\e[1;33m"
+LIGHT_BLUE="\e[1;34m"
+LIGHT_PURPLE="\e[1;35m"
+LIGHT_CYAN="\e[1;36m"
+WHITE="\e[1;37m"
+
+function _create_user() {
+
+  local username
+  local password
+  local password_confirm
+  local disk_read
+  local disk_write
+  local use_samba
+
+  ask --text "Username" --output=username
+
+  if id "$username" >/dev/null 2>&1; then
+    rb --above
+    say --fatal "The user '$username' already exists."
+    exit 1
+  fi
+
+  ask --password "Password" --output=password --clear
+  ask --password "Type again" --output=password_confirm --clear
+
+  if [ "$password" != "$password_confirm" ]; then
+    say --fatal "Password mismatch."
+    exit 1
+  else
+    say --success "Password has been validated."
+  fi
+
+  ask --yes-no "Allow user to READ content of /mnt/disk ?" --output=disk_read --clear
+  if [ "$disk_read" -eq "1" ]; then
+    ask --yes-no "Allow user to WRITE content of /mnt/disk ?" --output=disk_write --clear
+    if [ "$disk_write" -eq "1" ]; then
+      say --success "User has been granted full access to /mnt/disk"
+    else
+      say --info "User has been granted read-only access to /mnt/disk"
+    fi
+  else
+    say --fatal "User will not have access to /mnt/disk"
+  fi
+
+  ask --yes-no "Allow user to use samba ?" --output=use_samba --clear
+  if [ "$use_samba" -eq "1" ]; then
+    say --success "Samba will be enabled for the account."
+  else
+    say --fatal "Samba will be disabled for the account."
+  fi
+
+  echo
+  say --warning "Please double check the info you provided."
+  ask --confirm --clear
+
+  say "Creating user..." && useradd -mNs /usr/bin/zsh -c "" $username
+  say "Setting up password..." && chpasswd <<<"$username:$password"
+
+  if [ "$disk_read" -eq "1" ]; then
+    say "Setting up permissions..."
+    usermod -a -G shared-disk-users $username
+    if [ "$disk_write" -eq "1" ]; then
+      usermod -a -G shared-disk-admins $username
+    fi
+  fi
+
+  if [ "$use_samba" -eq "1" ]; then
+    say "Setting up samba access..."
+    (
+      echo $password
+      echo $password
+    ) | smbpasswd -a -s $username
+  fi
+  say --success "The user has been created."
+}
+
+function _ufw_status() {
+  echo -e " ${CYAN}Allowed networks:$R"
+  while read -r IP MASK COMMENT; do
+    [[ -z "$IP" || "$IP" =~ ^# ]] && continue
+    echo -e "   $IP$BLUE/$MASK$R $ORANGE$COMMENT$R"
+  done <"$UFW_NETS_CONF"
+  echo
+  echo -e " ${CYAN}Ports Configuration:$R"
+
+  "$DIR/zx/report.zx.js" | while read -r state type port comment; do
+    OUT="$BLUE$type $WHITE$port $LIGHT_GRAY$comment"
+    case $state in
+    listening) echo -e "   $GREEN$state $OUT$RESET" ;;
+    opened) echo -e "      $LIGHT_BLUE$state $OUT$RESET" ;;
+    blocked) echo -e "     $LIGHT_PURPLE$state $OUT$RESET" ;;
+    closed) echo -e "      $YELLOW$state $OUT$RESET" ;;
+    leaking) echo -e "     $RED$state $OUT$RESET" ;;
+    accessible) echo -e "  $ORANGE$state $OUT$RESET" ;;
+    *) echo -e "         [?] $OUT$RESET" ;;
+    esac
+  done
+}
+
+function _ufw_apply() {
+  say --echo "Resetting UFW to deny everything..."
+
+  ufw --force reset >/dev/null
+  ufw default deny incoming >/dev/null
+  ufw default allow outgoing >/dev/null
+  ufw default allow routed >/dev/null
+
+  say --success "UFW has been reset."
+
+  say --echo "Banning blacklisted IPs"
+  while read -r IP COMMENT; do
+    [[ -z "$IP" || "$IP" =~ ^# ]] && continue
+    ufw deny from $IP to any >/dev/null
+  done <"$UFW_BAN_CONF"
+  rb --above && say --success "IP Blacklist applied."
+
+  say --echo "Applying network configuration"
+  while read -r IP MASK COMMENT; do
+    [[ -z "$IP" || "$IP" =~ ^# ]] && continue
+    ufw allow from "$IP/$MASK" >/dev/null
+  done <"$UFW_NETS_CONF"
+  rb --above && say --success "Network configuration applied."
+
+  say --echo "Applying port configuration"
+  while read -r PORT TYPE COMMENT; do
+    [[ -z "$PORT" || "$PORT" =~ ^# ]] && continue
+    ufw allow "$PORT/$TYPE" >/dev/null
+  done <"$UFW_PORT_CONF"
+  say --success "Port configuration applied."
+
+  say --echo "Enabling UFW"
+  ufw --force enable >/dev/null
+  rb --above && say --success "UFW has been enabled."
+
+  say --echo "Reloading fail2ban"
+  systemctl restart fail2ban
+  rb --above && say --success "Fail2ban reloaded."
+
+  echo
+  say --success "UFW Reconfigured."
+}
+
+function _perms_fix() {
+  local user
+  local group
+  local fperm
+  local dperm
+
+  say --info "Permission Fixer (running for $(pwd))"
+  ask --text "Give user ownership to" --output=user
+  ask --text "Give group ownership to" --output=group
+  ask --text "Permissions on file" --output=fperm
+  ask --text "Permissions on directory" --output=dperm
+
+  echo
+  say --warning "Please double check the info you provided."
+  ask --confirm --clear
+
+  chown $user:$group -R *
+  find . -type f -exec chmod $fperm {} \;
+  find . -type d -exec chmod $dperm {} \;
+}
+
+function _jails() {
+  # Get all active jails
+  JAILS=$(fail2ban-client status | grep "Jail list" | cut -d: -f2 | tr -d ' ')
+
+  if [[ -z "$JAILS" ]]; then
+    echo "No active fail2ban jails found."
+    exit 1
+  fi
+
+  # Loop through each jail and list banned IPs
+  echo -e " \e[36mBanned IPs:\e[0m"
+  for JAIL in $JAILS; do
+    BANNED_IPS=$(fail2ban-client status "$JAIL" | grep "Banned IP list" | cut -d: -f2)
+    BANTIME=$(fail2ban-client get "$JAIL" bantime)
+
+    while read -r IP; do
+      [[ -z "$IP" ]] && continue # Skip empty lines
+
+      BAN_TIMESTAMP=$(grep "Ban $IP" /var/log/fail2ban.log | tail -n 1 | awk '{print $1, $2}')
+
+      if [[ -n "$BAN_TIMESTAMP" ]]; then
+        BAN_UNIX=$(date -d "$BAN_TIMESTAMP" +%s)
+        CURRENT_TIME=$(date +%s)
+        BAN_END_TIME=$((BAN_UNIX + BANTIME))
+        REMAINING_TIME=$((BAN_END_TIME - CURRENT_TIME))
+        if [[ $REMAINING_TIME -gt 0 ]]; then
+          TIME_LEFT=$($HOME/.scripts/timed $REMAINING_TIME)
+        else
+          continue
+        fi
+      else
+        TIME_LEFT="Unknown"
+      fi
+
+      # Find the jail that triggered the ban
+      JAIL_NAME=$(grep "Ban $IP" /var/log/fail2ban.log | tail -n 1 | sed -n 's/.*\[\([^]]*\)\].*/\1/p')
+      # Print the result with a tab separator
+      echo -e "   $IP  \t\e[31m$TIME_LEFT\e[0m  \e[33mJail: $JAIL_NAME\e[0m"
+    done < <(echo "$BANNED_IPS" | tr ' ' '\n') # Process substitution to split IPs correctly
+  done
+}
+
+function help() {
+  say --info "hostctl by alexapdo"
+  echo
+  say --echo "create user   Create a new user"
+  say --echo "ufw status    Show the current status of UFW"
+  say --echo "ufw apply     Apply the custom configuration to UFW"
+  say --echo "perms fix     Run chmod+chown on the current directory"
+  say --echo "jails         Show fail2ban jails"
+}
+
+case $1 in
+create)
+  case $2 in
+  user) _create_user ;;
+  *) help ;;
+  esac
+  ;;
+ufw)
+  case $2 in
+  status) _ufw_status ;;
+  apply) _ufw_apply ;;
+  *) help ;;
+  esac
+  ;;
+perms)
+  case $2 in
+  fix) _perms_fix ;;
+  *) help ;;
+  esac
+  ;;
+jails) _jails ;;
+*) help ;;
+esac

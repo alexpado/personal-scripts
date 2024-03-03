@@ -1,0 +1,219 @@
+#!/bin/bash
+SOURCE=${BASH_SOURCE[0]}
+while [ -L "$SOURCE" ]; do # resolve $SOURCE until the file is no longer a symlink
+  DIR=$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)
+  SOURCE=$(readlink "$SOURCE")
+  [[ $SOURCE != /* ]] && SOURCE=$DIR/$SOURCE # if $SOURCE was a relative symlink, we need to resolve it relative to the path where the symlink file was located
+done
+DIR=$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)
+
+DOCKER_SERVICES_PATH="$HOME/.services"
+BACKUP_SCRIPT_EXTENSION=".bkp.sh"
+BACKUP_SCRIPT_OUTPUT="/mnt/disk/backup-me"
+TODAY=$(date +%Y-%m-%d)
+
+function _log() {
+  echo "[$(date +'%Y-%m-%d %H:%M:%S')] $@"
+}
+
+function _fn_show_help() {
+  echo " (!) This script is deprecated and commands will be removed progressively."
+  echo " > 'nuc service' has been moved to 'dctl'"
+  echo " > 'nuc create proxy/web' has been moved to 'webctl'"
+  echo
+  echo "nuc help"
+  echo "nuc reboot"
+  echo "nuc install <app>"
+  echo "nuc backup"
+}
+
+# nuc reboot
+function _fn_reboot() {
+  apt update
+  apt upgrade
+  /usr/sbin/reboot
+}
+
+function _fn_backup() {
+  mkdir -p $BACKUP_SCRIPT_OUTPUT/.logs
+
+  _log "Finding users in [ /home ]"
+
+  find /home -mindepth 1 -maxdepth 1 -type d -print0 | while read -d $'\0' USER_HOME; do
+    USERNAME=$(basename -- $USER_HOME)
+    USER_BACKUP_DIRECTORY=$BACKUP_SCRIPT_OUTPUT/$USERNAME
+
+    if [ ! -d "$USER_BACKUP_DIRECTORY" ]; then
+      _log "【$USERNAME】Creating user backup folder..."
+      su $USERNAME -c "mkdir -p $USER_BACKUP_DIRECTORY"
+      su $USERNAME -c "chown -R $USERNAME:shared_disk_admins $USER_BACKUP_DIRECTORY"
+      su $USERNAME -c "chmod 770 $USER_BACKUP_DIRECTORY"
+    fi
+
+    _log "【$USERNAME】Scanning user home for backup scripts..."
+
+    find $USER_HOME -mindepth 1 -type f -name "*$BACKUP_SCRIPT_EXTENSION" -print0 | while read -d $'\0' SCRIPT; do
+      _log "【$USERNAME】Found script [ $SCRIPT ] "
+
+      ACTIVE_DIRECTORY=$(dirname $SCRIPT)
+      BACKUP_NAME=$(basename $SCRIPT $BACKUP_SCRIPT_EXTENSION)
+      BACKUP_OUTPUT=$USER_BACKUP_DIRECTORY/$BACKUP_NAME
+      su $USERNAME -c "mkdir -p $BACKUP_OUTPUT"
+
+      _log "【$USERNAME】$BACKUP_NAME > Running backup script..."
+      BACKUP_TARGET=$(su $USERNAME -c "cd $ACTIVE_DIRECTORY; $SCRIPT")
+
+      _log "【$USERNAME】$BACKUP_NAME > Cheking [ $BACKUP_TARGET ] as backup output..."
+      if [ -f $BACKUP_TARGET ]; then
+        BACKUP_FILENAME=$(basename -- $BACKUP_TARGET)
+        BACKUP_EXTENSION="${BACKUP_FILENAME##*.}"
+
+        _log "【$USERNAME】$BACKUP_NAME > Copying as [ $TODAY.$BACKUP_EXTENSION ] in [ $BACKUP_OUTPUT ]..."
+        su $USERNAME -c "cd $ACTIVE_DIRECTORY; cp $BACKUP_TARGET $BACKUP_OUTPUT/$TODAY.$BACKUP_EXTENSION; rm $BACKUP_TARGET"
+      else
+        _log "【$USERNAME】$BACKUP_NAME > This script can only backup files. Please compress your folder for backup"
+      fi
+    done
+  done
+}
+
+# nuc install <app>
+function _fn_install_app() {
+  echo "Looking for override install script at $DIR/install-scripts/$1..."
+  if [ ! -f "$DIR/install-scripts/$1" ]; then
+    echo "No install overrides. Trying with apt-get..."
+    apt-get install $1
+  else
+    /bin/bash "$DIR/install-scripts/$1"
+  fi
+}
+
+## Non accessible method from user commands (utils)
+
+function __wait_for_key() {
+  read -p "Press any key to continue..." -n 1 -r
+  echo
+}
+
+function __fn_write_nginx_web() {
+  mkdir "/var/www/$1"
+  mkdir "/var/www/$1/web"
+
+  {
+    echo "server {"
+    echo "  listen 80;"
+    echo "  listen [::]:80;"
+    echo
+    echo "  server_tokens off;"
+    echo "  server_name $1;"
+    echo
+    echo "  root /var/www/$1/web;"
+    echo "  index index.html;"
+    echo
+    echo "  location / {"
+    echo "    try_files \$uri \$uri/ =404;"
+    echo "  }"
+    echo "}"
+  } >"/etc/nginx/sites-available/$1.conf"
+
+  ln -s "/etc/nginx/sites-available/$1.conf" "/etc/nginx/sites-enabled/$1.conf"
+  ln -s "/etc/nginx/sites-available/$1.conf" "/var/www/$1/nginx.conf"
+}
+
+function __fn_write_nginx_proxy() {
+  mkdir "/var/www/$1"
+
+  {
+    echo "server {"
+    echo "  listen 80;"
+    echo "  listen [::]:80;"
+    echo
+    echo "  server_tokens off;"
+    echo "  server_name $1;"
+    echo
+    echo "  root /var/www/$1;"
+    echo "  index index.html;"
+    echo
+    echo "  location / {"
+    echo "    proxy_set_header X-Real-Ip \$remote_addr;"
+    echo "    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;"
+    echo "    proxy_set_header Host \$host;"
+    echo "    proxy_set_header X-Forwarded-Host \$host:\$server_port;"
+    echo "    proxy_set_header X-Forwarded-Server \$host;"
+    echo "    proxy_set_header REMOTE_ADDR \$remote_addr;"
+    echo ""
+    echo "    proxy_connect_timeout       3600;"
+    echo "    proxy_send_timeout          3600;"
+    echo "    proxy_read_timeout          3600;"
+    echo "    send_timeout                3600;"
+    echo ""
+    echo "    proxy_pass http://$2:$3;"
+    echo "  }"
+    echo "}"
+  } >"/etc/nginx/sites-available/$1.conf"
+
+  ln -s "/etc/nginx/sites-available/$1.conf" "/etc/nginx/sites-enabled/$1.conf"
+  ln -s "/etc/nginx/sites-available/$1.conf" "/var/www/$1/nginx.conf"
+}
+
+case $1 in
+reboot)
+  _fn_reboot
+  ;;
+install)
+  _fn_install_app $2
+  ;;
+create)
+  case $2 in
+  user)
+    _fn_create_user
+    ;;
+  web)
+    _fn_create_web
+    ;;
+  proxy)
+    _fn_create_proxy
+    ;;
+  *)
+    _fn_show_help
+    ;;
+  esac
+  ;;
+service)
+  case $2 in
+  start)
+    _fn_service_start $3
+    ;;
+  stop)
+    _fn_service_stop $3
+    ;;
+  restart)
+    _fn_service_restart $3
+    ;;
+  update)
+    _fn_service_update $3
+    ;;
+  logs)
+    _fn_service_logs $3
+    ;;
+  env)
+    _fn_service_open $3 .env
+    ;;
+  compose)
+    _fn_service_open $3 docker-compose.yml
+    ;;
+  *)
+    _fn_show_help
+    ;;
+  esac
+  ;;
+modify-script)
+  _fn_modify_script $2
+  ;;
+backup)
+  _fn_backup
+  ;;
+*)
+  _fn_show_help
+  ;;
+esac

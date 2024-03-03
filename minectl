@@ -1,0 +1,194 @@
+#!/bin/bash
+SOURCE=${BASH_SOURCE[0]}
+while [ -L "$SOURCE" ]; do # resolve $SOURCE until the file is no longer a symlink
+  DIR=$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)
+  SOURCE=$(readlink "$SOURCE")
+  [[ $SOURCE != /* ]] && SOURCE=$DIR/$SOURCE # if $SOURCE was a relative symlink, we need to resolve it relative to the path where the symlink file was located
+done
+DIR=$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)
+
+if [ ! -f "$DIR/.linux-output-tools" ]; then
+  echo "linux-output-tools not found"
+  exit 1
+fi
+
+source "$DIR/.linux-output-tools"
+
+# minectl start <server>
+# minectl stop <server> <duration|now>
+# minectl attach <server>
+# minectl send <server> <input...>
+# minectl create <server>
+# minectl delete <server>
+# minectl backup <server> <destination>
+# minectl list
+# minectl help
+
+ENVFILE=".env"
+
+if [ -f "$ENVFILE" ]; then
+  set -o allexport
+  source $ENVFILE
+  set +o allexport
+fi
+
+if [ -z "$INSTANCE" ]; then
+  echo "The instance name is not defined (INSTANCE)"
+  exit 1
+fi
+
+if [ -z "$JAVA" ]; then
+  echo "The java path is not defined (JAVA)"
+  exit 1
+fi
+
+if [ ! -f "$JAVA" ]; then
+  echo "Your java path seems wrong Please make sure the specified path lead to the java executable."
+  echo "> $JAVA"
+  exit 1
+fi
+
+if [ -z "$JAVA_MEMORY" ]; then
+  echo "The memory setting is not defined (JAVA_MEMORY)"
+  exit 1
+fi
+
+if [ "$USE_RCON" -eq "1" ]; then
+  if [ -z "$RCON_PORT" ]; then
+    echo "You enabled rcon but the rcon port is not set (RCON_PORT)"
+    exit 1
+  fi
+  if [ -z "$RCON_PASSWORD" ]; then
+    echo "You enabled rcon but the rcon password is not set (RCON_PASSWORD)"
+    exit 1
+  fi
+fi
+
+function _download_fabric() {
+  if [[ -z "$GAME_VERSION" ]]; then
+    GAME_VERSION=$(curl --silent 'https://meta.fabricmc.net/v2/versions/game' | jq -r '.[] | select(.stable==true) | .version' | fzf --height=50% --layout=reverse --header="Select a minecraft version to install")
+    if [[ -z "$GAME_VERSION" ]]; then
+      echo "Installation cancelled."
+      exit 1
+    fi
+  fi
+
+  if [[ -z "$LOADER_VERSION" ]]; then
+    LOADER_VERSION=$(curl --silent 'https://meta.fabricmc.net/v2/versions/loader' | jq -r '.[] | select(.stable==true) | .version' | fzf --height=50% --layout=reverse --header="Select a loader version")
+    if [[ -z "$LOADER_VERSION" ]]; then
+      echo "Installation cancelled."
+      exit 1
+    fi
+  fi
+
+  if [[ -z "$INSTALLER_VERSION" ]]; then
+    INSTALLER_VERSION=$(curl --silent 'https://meta.fabricmc.net/v2/versions/installer' | jq -r '.[] | select(.stable==true) | .version' | fzf --height=50% --layout=reverse --header="Select an installer version")
+    if [[ -z "$INSTALLER_VERSION" ]]; then
+      echo "Installation cancelled."
+      exit 1
+    fi
+  fi
+
+  echo "Downloading minecraft fabric..."
+  curl --silent -o server.jar https://meta.fabricmc.net/v2/versions/loader/$GAME_VERSION/$LOADER_VERSION/$INSTALLER_VERSION/server/jar
+  echo "eula=true" >eula.txt
+}
+
+function _rcon() {
+  CMD=$(echo "$@")
+  if [ "$USE_RCON" -eq "1" ]; then
+    $RCON --address 127.0.0.1:$RCON_PORT --password $RCON_PASSWORD "$CMD"
+  else
+    tmux send-keys -t "$INSTANCE" "$CMD" C-m
+  fi
+}
+
+function _stop() {
+  if [ "$USE_BOSS" -eq "1" ]; then
+    _rcon "bossbar add minecraft:shutdown {\"text\":\"Server Shutdown\"}"
+    _rcon "bossbar set minecraft:shutdown max $1"
+    _rcon "bossbar set minecraft:shutdown value $1"
+    _rcon "bossbar set minecraft:shutdown color red"
+  fi
+
+  _rcon "say [!] The server will shutdown in $1 seconds."
+  _rcon "execute at @a as @a run playsound minecraft:item.goat_horn.sound.0 master @s ~ ~ ~ 10 2"
+
+  for ((i = $1; i > 0; i--)); do
+    echo "[!] The server will shutdown in $i seconds."
+
+    if [ "$USE_BOSS" -eq "1" ]; then
+      _rcon "bossbar set minecraft:shutdown players @a"
+      _rcon "bossbar set minecraft:shutdown value $i"
+    fi
+
+    if [[ $i -lt 10 ]]; then
+      _rcon "execute at @a run playsound minecraft:block.stone_button.click_off master @p ~ ~ ~ 10 2"
+      _rcon "say [!] The server will shutdown in $i seconds."
+    fi
+    sleep 1
+  done
+
+  if [ "$USE_BOSS" -eq "1" ]; then
+    _rcon "bossbar remove minecraft:shutdown"
+  fi
+
+  touch .stop
+  _rcon "stop"
+  echo "Waiting for the server to fully stop..."
+  while tmux has-session -t "$INSTANCE" 2>/dev/null; do
+    sleep 1
+  done
+  rm .stop
+}
+
+function _start() {
+  if [ -f ".stop" ]; then
+    rm .stop
+  fi
+
+  while [ ! -f ".stop" ]; do
+    $JAVA -Xmx$JAVA_MEMORY -Xms$JAVA_MEMORY -XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200 -XX:+UnlockExperimentalVMOptions -XX:+DisableExplicitGC -XX:+AlwaysPreTouch -XX:G1NewSizePercent=30 -XX:G1MaxNewSizePercent=40 -XX:G1HeapRegionSize=8M -XX:G1ReservePercent=20 -XX:G1HeapWastePercent=5 -XX:G1MixedGCCountTarget=4 -XX:InitiatingHeapOccupancyPercent=15 -XX:G1MixedGCLiveThresholdPercent=90 -XX:G1RSetUpdatingPauseTimePercent=5 -XX:SurvivorRatio=32 -XX:+PerfDisableSharedMem -XX:MaxTenuringThreshold=1 -Daikars.new.flags=true -Dusing.aikars.flags=https://mcflags.emc.gs -jar server.jar --nogui
+  done
+}
+
+case $1 in
+stop)
+  if tmux has-session -t "$INSTANCE" 2>/dev/null; then
+    if [ -z "$2" ]; then
+      echo "Please provide a shutdown duration. Example: $0 stop 10"
+      exit 1
+    fi
+    _stop $2
+  else
+    echo "Server is not running"
+  fi
+  ;;
+start)
+  if tmux has-session -t "$INSTANCE" 2>/dev/null; then
+    echo "The server is already running"
+  else
+    tmux new-session -d -s "$INSTANCE" "$0 run"
+  fi
+  ;;
+run)
+  _start
+  ;;
+console)
+  if tmux has-session -t "$INSTANCE" 2>/dev/null; then
+    tmux attach-session -t "$INSTANCE"
+  else
+    echo "Server is not running"
+  fi
+  ;;
+download)
+  _download_fabric
+  ;;
+*)
+  if tmux has-session -t "$INSTANCE" 2>/dev/null; then
+    _rcon $@
+  else
+    echo "Server is not running"
+  fi
+  ;;
+esac

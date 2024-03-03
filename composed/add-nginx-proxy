@@ -1,0 +1,51 @@
+#!/bin/bash
+#
+# This script is part of the webctl util and exists for the sole purpose of
+# keeping the main script clean of the nginx configuration mess. 
+#
+# TNo data control / check will be done in this script as everything is done
+# in the webctl script. It is not meant to be called directly, unless you
+# REALLY know what you are doing.
+
+DOMAIN=$1
+IP=$2
+PORT=$3
+
+cat <<EOF >/etc/nginx/sites-available/$DOMAIN.conf
+server {
+  listen [::]:80;
+  listen 80;
+
+  server_tokens off;
+  server_name $DOMAIN;
+
+  root /var/www/$DOMAIN;
+  index index.html;
+
+  location / {
+    proxy_set_header X-Real-Ip \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Forwarded-Host \$host:\$server_port;
+    proxy_set_header X-Forwarded-Server \$host;
+    proxy_set_header REMOTE_ADDR \$remote_addr;
+
+    proxy_connect_timeout       3600;
+    proxy_send_timeout          3600;
+    proxy_read_timeout          3600;
+    send_timeout                3600;
+
+    proxy_pass http://$IP:$PORT;
+  }
+
+  location /ws {
+    proxy_pass http://$IP:$PORT;
+
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade \$http_upgrade;
+    proxy_set_header Connection "Upgrade";
+    proxy_set_header Host \$host;
+    proxy_read_timeout 86400;
+  }
+}
+EOF

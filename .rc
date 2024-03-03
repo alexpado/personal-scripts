@@ -1,0 +1,14 @@
+#!/bin/sh
+# This file is meant to be sourced into your rc file.
+
+alias dctl="$HOME/.scripts/dctl"
+alias hostctl="$HOME/.scripts/hostctl"
+alias webctl="$HOME/.scripts/webctl"
+
+# Deprecated - Will be removed soon.
+alias nuc="$HOME/.scripts/nuc"
+
+# Below, the script that are not production ready
+# Enable at your own risks
+
+# alias minectl="$HOME/.scripts/minectl"

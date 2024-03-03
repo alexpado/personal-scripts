@@ -1,0 +1,134 @@
+#!/bin/bash
+
+function trim() {
+  local var="$*"
+  var="${var#"${var%%[![:space:]]*}"}"
+  var="${var%"${var##*[![:space:]]}"}"
+  printf '%s' "$var"
+}
+
+function say() {
+  local type=0
+  local message=""
+  local rbtype
+
+  for argument in "$@"; do
+    case $argument in
+    --echo | -e) type=0 ;;
+    --info | -i) type=1 ;;
+    --success | -s) type=2 ;;
+    --warning | -w) type=3 ;;
+    --fatal | -f) type=4 ;;
+    *) message="$message$argument " ;;
+    esac
+  done
+
+  message=$(trim "$message")
+
+  case $type in
+  0) printf " 󰇘  $message\n" ;;
+  1) printf "\e[34;1m 󰋽  $message\e[0m\n" ;;
+  2) printf "\e[32;1m 󰄬  $message\e[0m\n" ;;
+  3) printf "\e[33;1m 󰒡  $message\e[0m\n" ;;
+  4) printf "\e[31;1m 󰂭  $message\e[0m\n" ;;
+  esac
+}
+
+function rb() {
+  type=0
+
+  for argument in "$@"; do
+    case $argument in
+    --line) type=0 ;;
+    --above) type=1 ;;
+    esac
+  done
+
+  case $type in
+  0) printf "\r\033[K" ;;
+  1) printf "\033[A\r\033[K" ;;
+  esac
+}
+
+ask_reply=""
+function ask() {
+  local type=-1
+  local clear=0
+  local prompt=""
+  local reply
+  local variable="ask_reply"
+
+  for argument in "$@"; do
+    case $argument in
+    --confirm) type=0 ;;
+    --yes-no) type=1 ;;
+    --text) type=2 ;;
+    --password) type=3 ;;
+    --clear) clear=1 ;;
+    --output=*)
+      variable="${argument#--output=}"
+      ;;
+    *) prompt="$prompt$argument " ;;
+    esac
+  done
+
+  if [ "$type" -eq "-1" ]; then
+    say --fatal "[DEV] Ask type not provided or wrongly typed."
+    exit 1
+  fi
+
+  prompt=$(trim "$prompt")
+
+  case $type in
+  0)
+    printf " 󰌓  Press \e[35;1mEnter\e[0m to continue."
+    read
+    [ "$clear" -eq "1" ] && rb --above
+    ;;
+  1)
+    local validated=0
+    while [ "$validated" -eq "0" ]; do
+      printf "\e[36;1m 󰘎  $prompt\e[0m [y/n]"
+      read -n 1 -s -r reply
+      printf "\b\b\b\b\b\033[K"
+      case "$reply" in
+      [Yy])
+        printf -v "$variable" "%s" "1"
+        validated=1
+        printf "(Yes)"
+        ;;
+      [Nn])
+        printf -v "$variable" "%s" "0"
+        validated=1
+        printf "(No)"
+        ;;
+      *)
+        rb --line
+        ;;
+      esac
+    done
+    [ "$clear" -eq "1" ] && rb --line || echo
+    ;;
+  2)
+    printf "\e[36;1m 󰘎  $prompt:\e[0m "
+    read "$variable"
+    [ "$clear" == "1" ] && rb --above
+    ;;
+  3)
+    printf "\e[36;1m 󰘎  $prompt:\e[0m "
+    read -s "$variable"
+    [ "$clear" == "1" ] && rb --line || echo
+    ;;
+  esac
+}
+
+(return 0 2>/dev/null) && sourced=1 || sourced=0
+
+if [ "$sourced" -eq "0" ]; then
+  case $1 in
+  ask) ask ${@:2} ;;
+  say) say ${@:2} ;;
+  rb) rb ${@:2} ;;
+  *) echo "ask, say, rb" ;;
+  esac
+fi

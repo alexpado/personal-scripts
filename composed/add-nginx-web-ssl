@@ -1,0 +1,69 @@
+#!/bin/bash
+#
+# This script is part of the webctl util and exists for the sole purpose of
+# keeping the main script clean of the nginx configuration mess. 
+#
+# TNo data control / check will be done in this script as everything is done
+# in the webctl script. It is not meant to be called directly, unless you
+# REALLY know what you are doing.
+
+
+DOMAIN=$1
+SSL=$2
+
+cat <<EOF >/etc/nginx/sites-available/$DOMAIN.conf
+server {
+  listen [::]:443 ssl;
+  listen 443 ssl;
+
+  server_tokens off;
+  server_name $DOMAIN;
+
+  root /var/www/$DOMAIN;
+  index index.html;
+
+  location / {
+    disable_symlinks off;
+    try_files \$uri \$uri/ =404;
+  }
+
+  location /ws {
+    proxy_pass http://$IP:$PORT;
+
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade \$http_upgrade;
+    proxy_set_header Connection "Upgrade";
+    proxy_set_header Host \$host;
+    proxy_read_timeout 86400;
+  }
+
+  location /404.html {}
+  location /403.html {}
+  location /401.html {}
+  location /500.html {}
+
+  error_page 404 /404.html;
+  error_page 403 /403.html;
+  error_page 401 /401.html;
+  error_page 500 /500.html;
+
+  ssl_certificate /etc/letsencrypt/live/$SSL/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/$SSL/privkey.pem;
+  include /etc/letsencrypt/options-ssl-nginx.conf;
+  ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+}
+
+server {
+  listen [::]:80;
+  listen 80;
+
+  server_tokens off;
+  server_name $DOMAIN;
+
+  if (\$host = $DOMAIN) {
+    return 301 https://\$host$request_uri;
+  }
+
+  return 404;
+}
+EOF

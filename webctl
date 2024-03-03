@@ -1,0 +1,197 @@
+#!/bin/bash
+SOURCE=${BASH_SOURCE[0]}
+while [ -L "$SOURCE" ]; do # resolve $SOURCE until the file is no longer a symlink
+  DIR=$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)
+  SOURCE=$(readlink "$SOURCE")
+  [[ $SOURCE != /* ]] && SOURCE=$DIR/$SOURCE # if $SOURCE was a relative symlink, we need to resolve it relative to the path where the symlink file was located
+done
+DIR=$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)
+
+if [ ! -f "$DIR/.linux-output-tools" ]; then
+  echo "linux-output-tools not found"
+  exit 1
+fi
+
+source "$DIR/.linux-output-tools"
+
+if [ "$UID" -ne "0" ]; then
+  say --fatal "Please execute this command as root."
+  exit 1
+fi
+
+# webctl
+#   create
+#   remove <domain>
+#   enable <domain>
+#   disable <domain>
+
+function _create() {
+  local domain
+  local use_ssl
+  local use_wildcard
+  local wildcard_domain
+  local use_reverse_proxy
+  local reverse_proxy_ip
+  local reverse_proxy_port
+
+  ask --text "New domain" --output=domain
+
+  if [ -f "/etc/nginx/site-available/$domain.conf" ]; then
+    rb --above
+    say --fatal "The domain '$domain' already exists."
+    exit 1
+  fi
+
+  ask --yes-no "Would you like to use SSL ?" --output=use_ssl --clear
+  if [ "$use_ssl" -eq "1" ]; then
+    ask --yes-no "Would you like to use existing certificates ?" --output=use_wildcard --clear
+    if [ "$use_wildcard" -eq "1" ]; then
+      ask --text "Use certificate of domain" --output=wildcard_domain --clear
+      if [ -d "/etc/letsencrypt/live/$wildcard_domain" ]; then
+        say --success "Certificates from '$wildcard_domain' will be used."
+      else
+        say --fatal "Unable to find any existing SSL certificates for '$wildcard_domain'"
+        say --info "If you want to use wildcard certificates, please generate them beforehand and re-run this wizard."
+        exit 1
+      fi
+    else
+      say --success "Certificates will be generated using certbot."
+      say --info "If you want to use wildcard certificates, please generate them beforehand and re-run this wizard."
+    fi
+  else
+    say --warning "SSL will not be used for this domain."
+  fi
+
+  ask --yes-no "Would you like to use this domain for a reverse proxy ?" --output=use_reverse_proxy --clear
+  if [ "$use_reverse_proxy" -eq "1" ]; then
+    ask --text "Reverse Proxy IP" --output=reverse_proxy_ip --clear
+    ask --text "Reverse Proxy PORT" --output=reverse_proxy_port --clear
+    say --success "Will be a reverse proxy to '$reverse_proxy_ip:$reverse_proxy_port'"
+  else
+    say --success "Will be serving files from '/var/www/$domain/web'"
+  fi
+
+  echo
+  say --warning "Please double check the info you provided."
+  ask --confirm --clear
+
+  if [ "$use_wildcard" -eq "1" ]; then
+    if [ "$use_reverse_proxy" -eq "1" ]; then
+      $DIR/composed/add-nginx-proxy-ssl $domain $wildcard_domain $reverse_proxy_ip $reverse_proxy_port
+    else
+      $DIR/composed/add-nginx-web-ssl $domain $wildcard_domain
+    fi
+  else
+    if [ "$use_reverse_proxy" -eq "1" ]; then
+      $DIR/composed/add-nginx-proxy $domain $reverse_proxy_ip $reverse_proxy_port
+    else
+      $DIR/composed/add-nginx-web $domain
+    fi
+  fi
+
+  mkdir -p "/var/www/$domain/web"
+  ln -s "/etc/nginx/sites-available/$domain.conf" "/etc/nginx/sites-enabled/$domain.conf"
+  ln -s "/etc/nginx/sites-available/$domain.conf" "/var/www/$domain/nginx.conf"
+
+  if [ "$use_ssl" -eq "1" ] && [ "$use_wildcard" -eq "0" ]; then
+    certbot run --nginx -d "$domain"
+  else
+    systemctl reload nginx
+  fi
+}
+
+function _remove() {
+  local domain=$1
+
+  if [ -z "$domain" ]; then
+    say --fatal "Please provide a domain name."
+    exit 1
+  fi
+
+  if [ ! -f "/etc/nginx/sites-available/$domain.conf" ]; then
+    say --fatal "The domain '$domain' does not exist."
+    exit 1
+  fi
+
+  say --warning "The domain '$domain' is going to be deleted."
+  say --info "This also include the directory /var/www/$domain"
+  echo
+  say --warning "Continue with deletion of $domain ? This action is irreversible."
+  ask --confirm --clear
+
+  rm -rf "/var/www/$domain"
+  rm -rf "/etc/nginx/sites-enabled/$domain.conf"
+  rm -rf "/etc/nginx/sites-available/$domain.conf"
+
+  systemctl reload nginx
+  say --success "The domain has been removed."
+}
+
+function _enable() {
+  local domain=$1
+
+  if [ -z "$domain" ]; then
+    say --fatal "Please provide a domain name."
+    exit 1
+  fi
+
+  if [ ! -f "/etc/nginx/sites-available/$domain.conf" ]; then
+    say --fatal "The domain '$domain' does not exist."
+    exit 1
+  fi
+
+  if [ -f "/etc/nginx/sites-enabled/$domain.conf" ]; then
+    say --fatal "The domain '$domain' is already enabled."
+    exit 1
+  fi
+
+  ln -s "/etc/nginx/sites-available/$domain.conf" "/etc/nginx/sites-enabled/$domain.conf"
+  systemctl reload nginx
+  say --success "The domain '$domain' is now enabled."
+}
+
+function _disable() {
+  local domain=$1
+
+  if [ -z "$domain" ]; then
+    say --fatal "Please provide a domain name."
+    exit 1
+  fi
+
+  if [ ! -f "/etc/nginx/sites-available/$domain.conf" ]; then
+    say --fatal "The domain '$domain' does not exist."
+    exit 1
+  fi
+
+  if [ ! -f "/etc/nginx/sites-enabled/$domain.conf" ]; then
+    say --fatal "The domain '$domain' is already disabled."
+    exit 1
+  fi
+
+  rm -rf "/etc/nginx/sites-enabled/$domain.conf"
+  systemctl reload nginx
+  say --success "The domain '$domain' is now disabled."
+}
+
+case $1 in
+create)
+  _create
+  ;;
+remove)
+  _remove $2
+  ;;
+enable)
+  _enable $2
+  ;;
+disable)
+  _disable $2
+  ;;
+*)
+  say --info "webctl by alexapdo"
+  echo
+  say --echo "create   Create a new nginx configuration"
+  say --echo "remove   Completely remove a nginx configuration, including web files."
+  say --echo "enable   Enable a nginx configuration"
+  say --echo "disable  Disable a nginx configuration"
+  ;;
+esac
