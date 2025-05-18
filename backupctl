@@ -1,0 +1,97 @@
+#!/bin/bash
+SOURCE=${BASH_SOURCE[0]}
+while [ -L "$SOURCE" ]; do # resolve $SOURCE until the file is no longer a symlink
+  DIR=$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)
+  SOURCE=$(readlink "$SOURCE")
+  [[ $SOURCE != /* ]] && SOURCE=$DIR/$SOURCE # if $SOURCE was a relative symlink, we need to resolve it relative to the path where the symlink file was located
+done
+DIR=$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)
+
+if [ ! -f "$DIR/.linux-output-tools" ]; then
+  echo "linux-output-tools not found"
+  exit 1
+fi
+
+source "$DIR/.linux-output-tools"
+
+BKP_PATH="/var/backups/nuc"
+BKP_DATE=$(date +%Y-%m-%d)
+GPG_KEY_ID="080F1B10EA67263D1C74E36493BA35487DB67B26"
+
+
+function __do_backup() {
+  local execute=1;
+
+  if [ "$1" == "--dry" ]; then
+    execute=0;
+  fi
+
+  local userHome;
+  local script;
+
+  find /home -mindepth 1 -maxdepth 1 -type d -print0 | while read -d $'\0' userHome; do
+    local username=$(basename -- $userHome)
+    say --echo "Scanning user '$username'..."
+    find $userHome -mindepth 1 -type f -name "*.bkp.sh" -print0 | while read -d $'\0' script; do
+      local workDir=$(dirname $script)
+      local name=$(basename $script ".bkp.sh")
+      say -t --info "Found bkp script '$name' in '$workDir'."
+
+      if [ "$execute" -eq "1" ]; then
+        mkdir -p "$BKP_PATH/$name"
+
+        say -t -t --echo "Running bkp script...."
+        local target=$(su $username -c "cd $workDir; $script")
+
+        rb --above && say -t -t --success "The backup has been completed."
+
+        local filename=$(basename -- $target)
+        local extension=""
+
+        if [[ "$filename" == *.* && "$filename" != .* ]]; then
+          extension="${filename#*.}"
+        fi
+
+        local backupName="$BKP_DATE.$extension"
+        local fullBackupPath="$BKP_PATH/$name/$backupName"
+        local fullGpgBackupPath="$BKP_PATH/$name/$backupName.gpg"
+
+        say -t -t --echo "Copying backup into '$BKP_PATH/$name'..."
+        su $USERNAME -c "cd $workDir; cp $target $BKP_PATH/$name/$backupName; shred -u $target"
+        rb --above && say -t -t --success "The backup has been copied."
+
+        say -t -t --echo "Encrypting using GPG..."
+        if [ -f $fullGpgBackupPath ]; then
+          shred -u $fullGpgBackupPath
+        fi
+        gpg --output $fullGpgBackupPath --encrypt --recipient $GPG_KEY_ID $fullBackupPath
+        shred -u $fullBackupPath
+        rb --above && say -t -t --success "The backup has been encrypted."
+
+        say -t -t --echo "Deploying backup..."
+        mkdir -p "/mnt/disk/backups/$name"
+
+        # -n here allow ssh to not mess with stdin which would mess up the (while read) loop
+        ssh -n backup "mkdir -p ~/$name"
+
+        cp $fullGpgBackupPath /mnt/disk/backups/$name/$backupName.gpg
+        scp $fullGpgBackupPath backup:~/$name/$backupName.gpg > /dev/null
+        rb --above && say -t -t --success "The backup has been deployed."
+      fi
+    done
+  done
+}
+
+case $1 in
+run)
+  __do_backup
+  ;;
+scan)
+  __do_backup --dry
+  ;;
+*)
+  say "help"
+  say "run"
+  say "scan"
+  ;;
+esac

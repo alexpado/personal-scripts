@@ -9,6 +9,7 @@ function trim() {
 
 function say() {
   local type=0
+  local tabs=0
   local message=""
   local rbtype
 
@@ -19,18 +20,20 @@ function say() {
     --success | -s) type=2 ;;
     --warning | -w) type=3 ;;
     --fatal | -f) type=4 ;;
+    --tab | -t) ((tabs++)) ;;
     *) message="$message$argument " ;;
     esac
   done
 
+  local indent=$(printf "%*s" $((tabs * 2)) "")
   message=$(trim "$message")
 
   case $type in
   0) printf " 󰇘  $message\n" ;;
-  1) printf "\e[34;1m 󰋽  $message\e[0m\n" ;;
-  2) printf "\e[32;1m 󰄬  $message\e[0m\n" ;;
-  3) printf "\e[33;1m 󰒡  $message\e[0m\n" ;;
-  4) printf "\e[31;1m 󰂭  $message\e[0m\n" ;;
+  1) printf "\e[34;1m 󰋽 $indent $message\e[0m\n" ;;
+  2) printf "\e[32;1m 󰄬 $indent $message\e[0m\n" ;;
+  3) printf "\e[33;1m 󰒡 $indent $message\e[0m\n" ;;
+  4) printf "\e[31;1m 󰂭 $indent $message\e[0m\n" ;;
   esac
 }
 

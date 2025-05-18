@@ -4,6 +4,7 @@
 alias dctl="$HOME/.scripts/dctl"
 alias hostctl="$HOME/.scripts/hostctl"
 alias webctl="$HOME/.scripts/webctl"
+alias backupctl="$HOME/.scripts/backupctl"
 
 # Deprecated - Will be removed soon.
 alias nuc="$HOME/.scripts/nuc"
