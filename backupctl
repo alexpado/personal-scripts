@@ -77,6 +77,8 @@ function __do_backup() {
         cp $fullGpgBackupPath /mnt/disk/backups/$name/$backupName.gpg
         scp $fullGpgBackupPath backup:~/$name/$backupName.gpg > /dev/null
         rb --above && say -t -t --success "The backup has been deployed."
+
+        ssh -n laptop "notify-send 'A backup has been deployed' 'A new backup for $name is available.'"
       fi
     done
   done
